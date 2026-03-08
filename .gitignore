@@ -1,0 +1,36 @@
+# Secrets - never commit
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Logs and runtime data
+*.log
+trading.log
+trade_history.json
+
+# IDE / editor
+.idea/
+.vscode/
+.cursor/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Optional: uncomment if you want to keep ML/backtest outputs out of git
+# *.pkl
+# backtest_*.csv
