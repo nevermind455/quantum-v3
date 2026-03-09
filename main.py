@@ -23,7 +23,7 @@ Run:
   python backtest.py --days 30   (historical backtest, 1h bars)
 """
 
-import sys, time, os
+import sys, time, os, signal
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from bot.config import config
@@ -67,26 +67,38 @@ class QuantumBot:
         self.scan_count = 0
         self._paused = False
         self._daily_limit_hit = False
+        self._shutdown_requested = False  # set by Ctrl+C so we exit soon
+        self._trade_open_timestamps = []  # for MAX_TRADES_PER_DAY (rolling 24h)
         self._last_regime = None
         self._last_decision = None
         self._last_ml = None
         self._last_ob = None
 
-    def execute_confirmed_trade(self, trade_setup, decision):
+    def execute_confirmed_trade(self, symbol, trade_setup, decision):
         """Execute a trade after Telegram confirmation (when TG_CONFIRM_TRADES is True)."""
         if self.scan_mode:
             return
+        symbol = (symbol or config.SYMBOL).strip().upper()
+        max_per_day = getattr(config, "MAX_TRADES_PER_DAY", 0)
+        if max_per_day > 0:
+            now = time.time()
+            self._trade_open_timestamps = [t for t in self._trade_open_timestamps if now - t < 86400]
+            if len(self._trade_open_timestamps) >= max_per_day:
+                self.telegram.send(f"❌ Daily cap reached ({max_per_day} trades in 24h). Trade cancelled.")
+                return
         price = trade_setup.entry_price
-        pos = self.executor.open_trade(decision.signal, trade_setup)
+        pos = self.executor.open_trade(decision.signal, trade_setup, symbol=symbol)
         if pos:
+            self._trade_open_timestamps.append(time.time())
             self.portfolio.record_open(
-                config.SYMBOL, decision.signal, price,
+                symbol, decision.signal, price,
                 trade_setup.quantity, decision.confidence
             )
             self.telegram.notify_trade_open(
                 decision.signal, price, trade_setup.quantity,
                 trade_setup.stop_loss, trade_setup.tp1,
-                decision.confidence, decision.reason[:200]
+                decision.confidence, decision.reason[:200],
+                symbol=symbol
             )
             time.sleep(1)
 
@@ -94,7 +106,8 @@ class QuantumBot:
         print(f"\n{C.line('=', 70)}")
         print(f"  {C.bold(C.cyan('QUANTUM TRADING BOT v3.0'))} - {C.white('Institutional Grade')}")
         print(f"{C.line('=', 70)}")
-        print(f"  Symbol:       {C.white(config.SYMBOL)}")
+        symbols_str = ", ".join(config.SYMBOLS) if getattr(config, "SYMBOLS", None) else config.SYMBOL
+        print(f"  Symbols:      {C.white(symbols_str)}")
         print(f"  Mode:         {C.bg_yellow(' SCAN ONLY ') if self.scan_mode else C.bg_red(' LIVE TRADING ')}")
         print(f"  Leverage:     {C.yellow(f'{config.LEVERAGE}x')} {C.cyan(config.MARGIN_TYPE)}")
         print(f"  Risk/Trade:   {C.red(f'{config.RISK_PER_TRADE}%')} of balance")
@@ -113,125 +126,127 @@ class QuantumBot:
         print(f"{C.line('=', 70)}\n")
 
     def run_cycle(self):
-        """Execute one full trading cycle."""
+        """Execute one full trading cycle. Scans all symbols and can open up to MAX_OPEN_POSITIONS (4)."""
         self.scan_count += 1
         log.info(C.line("-", 60))
         log.info(f"{C.bold(C.cyan(f'CYCLE #{self.scan_count}'))} - {time.strftime('%H:%M:%S UTC')}")
 
-        # === STEP 1: Fetch all market data ===
-        log.info(f"  {C.dim('1.')} Fetching market data...")
-        snapshot = self.data.fetch_market_snapshot()
-        klines = snapshot["klines"]
-        if not klines or "5m" not in klines:
-            log.warning("  No market data. Skipping cycle.")
-            return
+        symbols = getattr(config, "SYMBOLS", None) or [config.SYMBOL]
 
-        price = snapshot["mark_price"]
-        if price <= 0:
-            price = klines["5m"]["close"].iloc[-1]
+        for symbol in symbols:
+            # === STEP 1: Fetch market data for this symbol ===
+            log.info(f"  {C.dim('1.')} [{symbol}] Fetching market data...")
+            snapshot = self.data.fetch_market_snapshot(symbol=symbol)
+            klines = snapshot["klines"]
+            if not klines or "5m" not in klines:
+                log.warning(f"  [{symbol}] No market data. Skip.")
+                continue
 
-        # === STEP 2: Analyze order book ===
-        log.info(f"  {C.dim('2.')} Analyzing order book...")
-        ob = self.ob_analyzer.analyze(snapshot["orderbook"], price)
-        self._last_ob = ob
+            price = snapshot["mark_price"]
+            if price <= 0:
+                price = float(klines["5m"]["close"].iloc[-1])
 
-        # === STEP 3: Detect whale activity ===
-        log.info(f"  {C.dim('3.')} Detecting whale activity...")
-        whales = self.whale_detector.analyze(snapshot["recent_trades"], price)
+            # === STEP 2-5: Analyze for this symbol ===
+            ob = self.ob_analyzer.analyze(snapshot["orderbook"], price)
+            whales = self.whale_detector.analyze(snapshot["recent_trades"], price)
+            indicators = Indicators.calculate_multi_timeframe(klines)
+            i5 = indicators.get("5m")
+            i1h = indicators.get("1h")
+            i4h = indicators.get("4h")
+            if i5 and i1h and i4h:
+                regime = MarketRegime.detect(i5, i1h, i4h, ob, i5.volatility_score)
+            else:
+                regime = MarketRegime.detect(i5 or indicators.get("5m"), i1h or i5, i4h or i5, ob)
 
-        # === STEP 4: Calculate indicators ===
-        log.info(f"  {C.dim('4.')} Calculating indicators...")
-        indicators = Indicators.calculate_multi_timeframe(klines)
+            # === STEP 6: ML Prediction (per symbol) ===
+            if self.ml.should_retrain():
+                df_1h = klines.get("1h")
+                if df_1h is not None and len(df_1h) >= 100:
+                    self.ml.train(df_1h)
+            ml_pred = self.ml.predict(klines.get("5m"))
 
-        # === STEP 5: Detect market regime ===
-        log.info(f"  {C.dim('5.')} Detecting market regime...")
-        i5 = indicators.get("5m")
-        i1h = indicators.get("1h")
-        i4h = indicators.get("4h")
-        if i5 and i1h and i4h:
-            regime = MarketRegime.detect(i5, i1h, i4h, ob, i5.volatility_score)
-        else:
-            regime = MarketRegime.detect(i5 or indicators.get("5m"),
-                                         i1h or i5, i4h or i5, ob)
-        self._last_regime = regime
+            # === STEP 7: AI Decision ===
+            decision = self.ai.decide(indicators, ml_pred, ob, whales, regime)
+            self._last_regime = regime
+            self._last_decision = decision
+            self._last_ml = ml_pred
+            self._last_ob = ob
 
-        # === STEP 6: ML Prediction ===
-        log.info(f"  {C.dim('6.')} Running ML prediction...")
-        if self.ml.should_retrain():
-            log.info(f"  {C.yellow('Retraining ML model...')}")
-            df_1h = klines.get("1h")
-            if df_1h is not None and len(df_1h) >= 100:
-                self.ml.train(df_1h)
-        ml_pred = self.ml.predict(klines.get("5m"))
-        self._last_ml = ml_pred
+            # === STEP 8-9: Execute if signal and capacity ===
+            if decision.signal == "NO_TRADE" or decision.confidence < config.MIN_CONFIDENCE:
+                continue
 
-        # === STEP 7: AI Decision Engine ===
-        log.info(f"  {C.dim('7.')} Running AI decision engine...")
-        decision = self.ai.decide(indicators, ml_pred, ob, whales, regime)
-        self._last_decision = decision
-
-        # === STEP 8-9: Position sizing + Execute ===
-        if decision.signal != "NO_TRADE" and decision.confidence >= config.MIN_CONFIDENCE:
-            log.info(f"  {C.dim('8.')} Calculating position size...")
-
-            # Check if we can trade
+            log.info(f"  {C.dim('8.')} [{symbol}] Signal {decision.signal} - calculating size...")
             pos_count = self.executor.get_position_count()
             if pos_count >= config.MAX_OPEN_POSITIONS:
                 log.info(f"  {C.yellow(f'[{pos_count}/{config.MAX_OPEN_POSITIONS}]')} Max positions. Skip.")
-            elif self._daily_limit_hit:
+                continue
+            if self._daily_limit_hit:
                 log.info(f"  {C.red('Daily limit hit.')} Skip.")
-            elif not self.risk.check_exposure(self.client.get_open_positions(), self.portfolio.stats.balance):
+                continue
+            if not self.risk.check_exposure(self.client.get_open_positions(), self.portfolio.stats.balance):
                 log.info(f"  {C.yellow('Max exposure reached.')} Skip.")
-            elif ob.liquidity_score < 30:
-                log.info(f"  {C.red('Low liquidity.')} Skip.")
-            elif ob.spread_pct > 0.3:
-                log.info(f"  {C.red(f'Spread too wide: {ob.spread_pct:.3f}%')} Skip.")
+                continue
+            if ob.liquidity_score < 30:
+                log.info(f"  {C.red(f'[{symbol}] Low liquidity.')} Skip.")
+                continue
+            if ob.spread_pct > 0.3:
+                log.info(f"  {C.red(f'[{symbol}] Spread too wide: {ob.spread_pct:.3f}%')} Skip.")
+                continue
+
+            atr_raw = i5.atr if i5 else 0
+            if i5 and price > 0:
+                atr_raw = price * (i5.atr_pct / 100) if hasattr(i5, "atr_pct") else i5.atr
+            balance = self.portfolio.stats.balance
+            sym_info = self.client.get_sym_info(symbol)
+            trade_setup = self.risk.calculate_trade(
+                price, atr_raw, decision.signal, balance,
+                regime.position_size_factor, sym_info
+            )
+
+            if not trade_setup.valid:
+                log.info(f"  {C.yellow(f'[{symbol}] Rejected: {trade_setup.reject_reason}')}")
+                continue
+
+            log.info(f"\n  {C.bold('EXECUTING')} {C.bg_blue(' TRADE ')} {symbol}")
+            log.info(f"  Signal:  {C.bg_green(f' {decision.signal} ') if decision.signal == 'LONG' else C.bg_red(f' {decision.signal} ')} Conf: {C.white(f'{decision.confidence:.0f}%')}")
+            log.info(f"  Entry:   {C.white(f'${trade_setup.entry_price:.2f}')} | Qty: {C.cyan(str(trade_setup.quantity))}")
+            log.info(f"  SL:      {C.red(f'${trade_setup.stop_loss:.2f}')} ({trade_setup.risk_pct:.1f}%)")
+            log.info(f"  TP1:     {C.green(f'${trade_setup.tp1:.2f}')} | Reason: {C.dim(decision.reason[:80])}")
+
+            if self.scan_mode:
+                log.info(f"  {C.yellow('[SCAN ONLY - no execution]')}")
+                continue
+
+            # Cap at MAX_TRADES_PER_DAY (rolling 24h)
+            max_per_day = getattr(config, "MAX_TRADES_PER_DAY", 0)
+            if max_per_day > 0:
+                now = time.time()
+                self._trade_open_timestamps = [t for t in self._trade_open_timestamps if now - t < 86400]
+                if len(self._trade_open_timestamps) >= max_per_day:
+                    log.info(f"  {C.yellow(f'[{symbol}] Daily cap reached ({len(self._trade_open_timestamps)}/{max_per_day} in 24h). Skip.')}")
+                    continue
+
+            if getattr(config, "TG_CONFIRM_TRADES", False) and config.TG_ENABLED:
+                self.telegram.request_trade_confirm(trade_setup, decision, symbol=symbol)
+                log.info(f"  {C.yellow('Trade awaiting Telegram confirmation...')}")
             else:
-                atr = i5.atr if i5 else 0
-                atr_raw = i5.atr if i5 else 0
-                # Get raw ATR value
-                if i5 and price > 0:
-                    atr_raw = price * (i5.atr_pct / 100) if hasattr(i5, 'atr_pct') else i5.atr
+                pos = self.executor.open_trade(decision.signal, trade_setup, symbol=symbol)
+                if pos:
+                    self._trade_open_timestamps.append(time.time())
+                    self.portfolio.record_open(
+                        symbol, decision.signal, price,
+                        trade_setup.quantity, decision.confidence
+                    )
+                    self.telegram.notify_trade_open(
+                        decision.signal, price, trade_setup.quantity,
+                        trade_setup.stop_loss, trade_setup.tp1,
+                        decision.confidence, decision.reason[:200],
+                        symbol=symbol
+                    )
+                    time.sleep(1)
 
-                balance = self.portfolio.stats.balance
-                sym_info = self.client.get_sym_info()
-                trade_setup = self.risk.calculate_trade(
-                    price, atr_raw, decision.signal, balance,
-                    regime.position_size_factor, sym_info
-                )
-
-                if trade_setup.valid:
-                    log.info(f"\n  {C.bold('EXECUTING')} {C.bg_blue(' TRADE ')}")
-                    log.info(f"  Signal:  {C.bg_green(f' {decision.signal} ') if decision.signal == 'LONG' else C.bg_red(f' {decision.signal} ')} Conf: {C.white(f'{decision.confidence:.0f}%')}")
-                    log.info(f"  Entry:   {C.white(f'${trade_setup.entry_price:.2f}')} | Qty: {C.cyan(str(trade_setup.quantity))}")
-                    log.info(f"  SL:      {C.red(f'${trade_setup.stop_loss:.2f}')} ({trade_setup.risk_pct:.1f}%)")
-                    log.info(f"  TP1:     {C.green(f'${trade_setup.tp1:.2f}')} ({config.TP_RR_MIN}R)")
-                    log.info(f"  TP3:     {C.green(f'${trade_setup.tp3:.2f}')} ({config.TP_RR_MAX}R)")
-                    log.info(f"  Reason:  {C.dim(decision.reason[:100])}")
-
-                    if not self.scan_mode:
-                        if getattr(config, "TG_CONFIRM_TRADES", False) and config.TG_ENABLED:
-                            self.telegram.request_trade_confirm(trade_setup, decision)
-                            log.info(f"  {C.yellow('Trade awaiting Telegram confirmation...')}")
-                        else:
-                            pos = self.executor.open_trade(decision.signal, trade_setup)
-                            if pos:
-                                self.portfolio.record_open(
-                                    config.SYMBOL, decision.signal, price,
-                                    trade_setup.quantity, decision.confidence
-                                )
-                                self.telegram.notify_trade_open(
-                                    decision.signal, price, trade_setup.quantity,
-                                    trade_setup.stop_loss, trade_setup.tp1,
-                                    decision.confidence, decision.reason[:200]
-                                )
-                                time.sleep(1)
-                    else:
-                        log.info(f"  {C.yellow('[SCAN ONLY - no execution]')}")
-                else:
-                    log.info(f"  {C.yellow(f'Trade rejected: {trade_setup.reject_reason}')}")
-
-        # === STEP 10: Monitor positions ===
+        # === STEP 10: Monitor positions (all symbols) ===
         closed = self.executor.monitor_positions()
         for pos in closed:
             # Get realized PnL
@@ -293,12 +308,24 @@ class QuantumBot:
 
         log.info(f"Press {C.yellow('Ctrl+C')} to stop.\n")
 
+        def _on_sigint(signum, frame):
+            self._shutdown_requested = True
+            log.info(f"\n{C.yellow('Ctrl+C received — shutting down after this step...')}")
+
         try:
-            while True:
+            signal.signal(signal.SIGINT, _on_sigint)
+        except (AttributeError, ValueError):
+            pass  # Windows or unsupported
+
+        try:
+            while not self._shutdown_requested:
                 if self._paused or self._daily_limit_hit:
                     reason = "DAILY LIMIT" if self._daily_limit_hit else "PAUSED"
                     log.info(f"{C.bg_yellow(f' {reason} ')} Waiting...")
-                    time.sleep(10)
+                    for _ in range(10):
+                        if self._shutdown_requested:
+                            break
+                        time.sleep(1)
                     continue
 
                 try:
@@ -306,6 +333,9 @@ class QuantumBot:
                 except Exception as e:
                     log.error(f"Cycle error: {C.red(str(e))}")
                     self.telegram.send(f"<b>ERROR</b>\n<code>{str(e)[:500]}</code>")
+
+                if self._shutdown_requested:
+                    break
 
                 # Periodic PnL notification to Telegram every 12 cycles (~12 min)
                 if config.TG_ENABLED and self.scan_count > 0 and self.scan_count % 12 == 0:
@@ -315,7 +345,13 @@ class QuantumBot:
                     )
 
                 log.info(f"\n{C.dim(f'Next cycle in {config.SCAN_INTERVAL}s...')}\n")
-                time.sleep(config.SCAN_INTERVAL)
+                for _ in range(config.SCAN_INTERVAL):
+                    if self._shutdown_requested:
+                        break
+                    time.sleep(1)
+
+            if self._shutdown_requested:
+                raise KeyboardInterrupt  # use same shutdown path
 
         except KeyboardInterrupt:
             log.info(f"\n\n{C.bg_yellow(' SHUTTING DOWN ')}")

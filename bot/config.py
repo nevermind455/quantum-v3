@@ -46,8 +46,12 @@ class Config:
     API_SECRET: str = _clean_key(os.environ.get("BINANCE_API_SECRET", ""))
     TESTNET: bool = os.environ.get("BINANCE_TESTNET", "false").lower() == "true"
 
-    # Trading
-    SYMBOL: str = "BTCUSDT"
+    # Trading: one symbol (SYMBOL) or multiple (SYMBOLS). Default: BTCUSDT only.
+    _sym_env = os.environ.get("TRADING_SYMBOLS", os.environ.get("TRADING_SYMBOL", os.environ.get("SYMBOL", "BTCUSDT")))
+    SYMBOLS: List[str] = [s.strip().upper() for s in _sym_env.replace(",", " ").split() if s.strip()]
+    if not SYMBOLS:
+        SYMBOLS = ["BTCUSDT"]
+    SYMBOL: str = SYMBOLS[0]  # first symbol (backward compat)
     LEVERAGE: int = int(os.environ.get("LEVERAGE", "10"))
     MARGIN_TYPE: str = os.environ.get("MARGIN_TYPE", "CROSSED")
     TIMEFRAMES: List[str] = field(default_factory=lambda: ["1m", "5m", "15m", "1h", "4h"])
@@ -55,7 +59,7 @@ class Config:
     # Risk Management
     RISK_PER_TRADE: float = 10.0          # 10% of balance per trade
     MAX_PORTFOLIO_EXPOSURE: float = 10.0  # max 10% total exposure
-    MAX_OPEN_POSITIONS: int = 3
+    MAX_OPEN_POSITIONS: int = int(os.environ.get("MAX_OPEN_POSITIONS", "4"))
     DAILY_LOSS_LIMIT: float = 5.0         # stop at 5% daily loss
     SL_ATR_MULTIPLIER: float = 1.5
     TP_RR_MIN: float = 2.0               # minimum 2:1 reward:risk
@@ -66,15 +70,17 @@ class Config:
     TRAILING_SL_PCT: float = 1.0
     PARTIAL_TP_PCT: float = 50.0          # close 50% at TP1
     MOVE_SL_TO_BE: bool = True            # move SL to breakeven after TP1
+    TAKE_PROFIT_USD: float = float(os.environ.get("TAKE_PROFIT_USD", "15"))  # close when profit >= this (0 = disabled)
 
     # ML Model
     ML_LOOKBACK: int = 500                # candles for training
     ML_RETRAIN_HOURS: int = 6             # retrain every 6 hours
     ML_MIN_CONFIDENCE: float = 60.0       # minimum ML confidence to trade
-    ML_MIN_TEST_ACCURACY: float = 0.52    # min test-set accuracy (0-1) to use ML signal; below = treat as neutral
+    ML_MIN_TEST_ACCURACY: float = float(os.environ.get("ML_MIN_TEST_ACCURACY", "0.48"))  # lower = use ML more (more trades)
 
-    # AI Engine
-    MIN_CONFIDENCE: float = 65.0          # minimum overall confidence to trade
+    # AI Engine (lower = more trades, higher = fewer/safer). Tuned for ~50 trades/day.
+    MIN_CONFIDENCE: float = float(os.environ.get("MIN_CONFIDENCE", "52"))
+    MAX_TRADES_PER_DAY: int = int(os.environ.get("MAX_TRADES_PER_DAY", "50"))  # 0 = no limit
     SIGNAL_WEIGHTS: dict = field(default_factory=lambda: {
         "technical": 0.25,
         "ml_prediction": 0.25,

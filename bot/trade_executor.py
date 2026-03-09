@@ -2,6 +2,7 @@
 Trade Executor - handles all order execution and position management.
 Market orders, SL/TP placement, trailing stops, partial profit taking.
 """
+import math
 import time
 from dataclasses import dataclass, field
 from typing import List
@@ -32,9 +33,9 @@ class TradeExecutor:
         self.client = client
         self.positions: List[TrackedPosition] = []
 
-    def open_trade(self, signal, trade_setup):
-        """Execute a new trade."""
-        symbol = config.SYMBOL
+    def open_trade(self, signal, trade_setup, symbol=None):
+        """Execute a new trade. symbol defaults to config.SYMBOL."""
+        symbol = (symbol or config.SYMBOL).strip().upper()
         direction = signal
 
         # Check existing position on this pair
@@ -49,33 +50,35 @@ class TradeExecutor:
         self.client.cancel_all_orders(symbol)
         time.sleep(0.3)
 
-        # Set margin and leverage
+        # Set margin and leverage for this symbol
         try:
             self.client.client.futures_change_margin_type(symbol=symbol, marginType=config.MARGIN_TYPE)
         except: pass
-        self.client.set_leverage()
+        self.client.set_leverage(symbol=symbol)
 
         # Place market order
         from binance.enums import SIDE_BUY, SIDE_SELL
         side = SIDE_BUY if direction == "LONG" else SIDE_SELL
-        order = self.client.market_order(side, trade_setup.quantity)
+        order = self.client.market_order(side, trade_setup.quantity, symbol=symbol)
         if not order:
-            log.error(f"  {C.bg_red(' ORDER FAILED ')}")
+            log.error(f"  {C.bg_red(' ORDER FAILED ')} {symbol}")
             return None
 
         log.info(f"  {C.bg_green(' ORDER FILLED ')} {symbol} {direction} | ID: {order.get('orderId')}")
 
         # Place SL
         sl_side = SIDE_SELL if direction == "LONG" else SIDE_BUY
-        self.client.stop_loss_order(sl_side, trade_setup.stop_loss)
+        self.client.stop_loss_order(sl_side, trade_setup.stop_loss, symbol=symbol)
 
-        # Place TP1 (partial - 50%)
-        si = self.client.get_sym_info()
-        tp1_qty = self.client.round_qty(trade_setup.quantity * (config.PARTIAL_TP_PCT / 100))
-        min_qty = si.get("min_qty", 0.001)
-        if tp1_qty < min_qty:
-            tp1_qty = trade_setup.quantity
-        self.client.take_profit_order(sl_side, trade_setup.tp1, tp1_qty)
+        # Place TP1 only if not using "close at $X profit" mode (so full position can reach $15)
+        take_profit_usd = getattr(config, "TAKE_PROFIT_USD", 0)
+        si = self.client.get_sym_info(symbol)
+        if take_profit_usd <= 0:
+            tp1_qty = self.client.round_qty(trade_setup.quantity * (config.PARTIAL_TP_PCT / 100), symbol=symbol)
+            min_qty = si.get("min_qty", 0.001)
+            if tp1_qty < min_qty:
+                tp1_qty = trade_setup.quantity
+            self.client.take_profit_order(sl_side, trade_setup.tp1, tp1_qty, symbol=symbol)
 
         # Track position
         pos = TrackedPosition(
@@ -120,15 +123,36 @@ class TradeExecutor:
             symbol = bp["symbol"]
             mark = self.client.get_mark_price(symbol)
             pnl = float(bp.get("unRealizedProfit", 0))
+            amt = float(bp.get("positionAmt", 0))
 
-            for pos in self.positions:
-                if pos.symbol == symbol:
-                    is_long = pos.direction == "LONG"
-                    sl_side = SIDE_SELL if is_long else SIDE_BUY
-                    si = self.client.get_sym_info(symbol)
-                    pp = si.get("price_precision", 2)
+            for pos in list(self.positions):
+                if pos.symbol != symbol:
+                    continue
+                is_long = pos.direction == "LONG"
+                sl_side = SIDE_SELL if is_long else SIDE_BUY
+                si = self.client.get_sym_info(symbol)
+                pp = si.get("price_precision", 2)
 
-                    # TP1 check - move SL to breakeven
+                # Take profit at $X (e.g. $15) - close and don't hold further
+                take_profit_usd = getattr(config, "TAKE_PROFIT_USD", 0)
+                if take_profit_usd > 0 and pnl >= take_profit_usd:
+                    try:
+                        self.client.cancel_all_orders(symbol)
+                        time.sleep(0.3)
+                        step = si.get("step_size", 0.001)
+                        prec = si.get("qty_precision", 3)
+                        cq = round(math.floor(abs(amt) / step) * step, prec)
+                        if cq > 0:
+                            close_side = SIDE_SELL if amt > 0 else SIDE_BUY
+                            self.client.market_order(close_side, cq, symbol)
+                            closed.append(pos)
+                            self.positions.remove(pos)
+                            log.info(f"  {C.bg_green(' TAKE PROFIT $')} {symbol} {C.green(f'+${pnl:.2f}')} (>= ${take_profit_usd})")
+                    except Exception as e:
+                        log.debug("Take profit close failed: %s", e)
+                    continue
+
+                # TP1 check - move SL to breakeven
                     if not pos.tp1_hit and config.MOVE_SL_TO_BE:
                         if (is_long and mark >= pos.tp1) or (not is_long and mark <= pos.tp1):
                             pos.tp1_hit = True
@@ -169,7 +193,6 @@ class TradeExecutor:
     def close_all(self):
         """Close all positions on shutdown."""
         from binance.enums import SIDE_BUY, SIDE_SELL
-        import math
 
         positions = self.client.get_open_positions()
         if not positions:

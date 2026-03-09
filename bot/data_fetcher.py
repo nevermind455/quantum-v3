@@ -12,9 +12,9 @@ class DataFetcher:
     def __init__(self, client):
         self.client = client
 
-    def fetch_klines_df(self, interval="5m", limit=500):
+    def fetch_klines_df(self, interval="5m", limit=500, symbol=None):
         """Fetch klines and return as DataFrame."""
-        klines = self.client.get_klines(interval=interval, limit=limit)
+        klines = self.client.get_klines(interval=interval, limit=limit, symbol=symbol)
         if not klines:
             return None
         df = pd.DataFrame(klines, columns=[
@@ -29,48 +29,49 @@ class DataFetcher:
         df["time"] = pd.to_datetime(df["time"], unit="ms")
         return df
 
-    def fetch_all_timeframes(self):
+    def fetch_all_timeframes(self, symbol=None):
         """Fetch klines for all configured timeframes."""
         data = {}
         for tf in config.TIMEFRAMES:
-            df = self.fetch_klines_df(interval=tf, limit=config.ML_LOOKBACK)
+            df = self.fetch_klines_df(interval=tf, limit=config.ML_LOOKBACK, symbol=symbol)
             if df is not None:
                 data[tf] = df
         return data
 
-    def fetch_orderbook(self):
+    def fetch_orderbook(self, symbol=None):
         """Fetch order book depth."""
-        return self.client.get_orderbook(limit=config.OB_DEPTH_LEVELS)
+        return self.client.get_orderbook(limit=config.OB_DEPTH_LEVELS, symbol=symbol)
 
-    def fetch_recent_trades(self, limit=500):
+    def fetch_recent_trades(self, limit=500, symbol=None):
         """Fetch recent trades for whale detection."""
-        return self.client.get_recent_trades(limit=limit)
+        return self.client.get_recent_trades(limit=limit, symbol=symbol)
 
-    def fetch_funding_rate(self, limit=8):
+    def fetch_funding_rate(self, limit=8, symbol=None):
         """Fetch funding rate history."""
-        data = self.client.get_funding_rate(limit=limit)
+        data = self.client.get_funding_rate(limit=limit, symbol=symbol)
         if not data:
             return []
         return data
 
-    def fetch_open_interest(self):
+    def fetch_open_interest(self, symbol=None):
         """Fetch current open interest."""
-        return self.client.get_open_interest()
+        return self.client.get_open_interest(symbol=symbol)
 
-    def fetch_oi_history(self, period="5m", limit=12):
+    def fetch_oi_history(self, period="5m", limit=12, symbol=None):
         """Fetch open interest history."""
-        return self.client.get_open_interest_hist(period=period, limit=limit)
+        return self.client.get_open_interest_hist(period=period, limit=limit, symbol=symbol)
 
-    def fetch_market_snapshot(self):
-        """Fetch complete market snapshot - all data in one call."""
+    def fetch_market_snapshot(self, symbol=None):
+        """Fetch complete market snapshot for one symbol."""
+        sym = symbol or config.SYMBOL
         snapshot = {
-            "klines": self.fetch_all_timeframes(),
-            "orderbook": self.fetch_orderbook(),
-            "recent_trades": self.fetch_recent_trades(),
-            "funding_rate": self.fetch_funding_rate(),
-            "open_interest": self.fetch_open_interest(),
-            "oi_history": self.fetch_oi_history(),
-            "mark_price": self.client.get_mark_price(),
-            "ticker": self.client.get_ticker(),
+            "klines": self.fetch_all_timeframes(symbol=sym),
+            "orderbook": self.fetch_orderbook(symbol=sym),
+            "recent_trades": self.fetch_recent_trades(symbol=sym),
+            "funding_rate": self.fetch_funding_rate(symbol=sym),
+            "open_interest": self.fetch_open_interest(symbol=sym),
+            "oi_history": self.fetch_oi_history(symbol=sym),
+            "mark_price": self.client.get_mark_price(symbol=sym),
+            "ticker": self.client.get_ticker(symbol=sym),
         }
         return snapshot

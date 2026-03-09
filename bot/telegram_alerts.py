@@ -56,7 +56,7 @@ class TelegramAlerts:
         self._send_timestamps = deque(maxlen=config.TG_RATE_LIMIT_PER_MINUTE * 2)
         self._sender_running = False
         # Pending trade for confirmation flow
-        self._pending_trade = None  # (trade_setup, decision) when TG_CONFIRM_TRADES
+        self._pending_trade = None  # (symbol, trade_setup, decision) when TG_CONFIRM_TRADES
 
     def set_bot_ref(self, bot):
         self._bot_ref = bot
@@ -129,7 +129,7 @@ class TelegramAlerts:
     def notify_startup(self, balance):
         msg = (
             f"<b>🚀 QUANTUM v3.0 STARTED</b>\n"
-            f"----\nBTCUSDT | {config.LEVERAGE}x | Risk: {config.RISK_PER_TRADE}%\n"
+            f"----\n{', '.join(getattr(config, 'SYMBOLS', [config.SYMBOL]))} | {config.LEVERAGE}x | Risk: {config.RISK_PER_TRADE}%\n"
             f"SL: ATR x{config.SL_ATR_MULTIPLIER} | TP R:R: {config.TP_RR_MIN}/{config.TP_RR_MAX}\n"
             f"Max positions: {config.MAX_OPEN_POSITIONS}\nML + OB + Whale + Regime\n"
             f"Balance: <code>${balance:.2f}</code>\n----\n/help for commands"
@@ -140,20 +140,22 @@ class TelegramAlerts:
     def notify_shutdown(self):
         self.send("<b>🛑 BOT STOPPED</b>")
 
-    def notify_trade_open(self, direction, entry, qty, sl, tp1, confidence, reason):
+    def notify_trade_open(self, direction, entry, qty, sl, tp1, confidence, reason, symbol=None):
+        sym = (symbol or config.SYMBOL).strip().upper()
         f = lambda v: f"{v:.2f}"
         self.send(
-            f"<b>✅ TRADE OPENED</b>\nBTCUSDT {direction}\n"
+            f"<b>✅ TRADE OPENED</b>\n{sym} {direction}\n"
             f"Entry: <code>${f(entry)}</code> | Qty: {qty}\nSL: <code>${f(sl)}</code> | TP1: <code>${f(tp1)}</code>\n"
             f"Conf: {confidence:.0f}% | {reason[:200]}"
         )
 
-    def request_trade_confirm(self, trade_setup, decision):
+    def request_trade_confirm(self, trade_setup, decision, symbol=None):
         """Send trade confirmation request with Approve/Cancel buttons. Stores pending for callback."""
-        self._pending_trade = (trade_setup, decision)
+        sym = (symbol or config.SYMBOL).strip().upper()
+        self._pending_trade = (sym, trade_setup, decision)
         f = lambda v: f"{v:.2f}"
         msg = (
-            f"<b>⚠️ CONFIRM TRADE</b>\nBTCUSDT {decision.signal}\n"
+            f"<b>⚠️ CONFIRM TRADE</b>\n{sym} {decision.signal}\n"
             f"Entry: <code>${f(trade_setup.entry_price)}</code> | Qty: {trade_setup.quantity}\n"
             f"SL: <code>${f(trade_setup.stop_loss)}</code> | TP1: <code>${f(trade_setup.tp1)}</code>\n"
             f"Conf: {decision.confidence:.0f}%\n{decision.reason[:150]}"
@@ -231,10 +233,15 @@ class TelegramAlerts:
                         self._handle("/" + data_val)
                     elif data_val == "confirm_yes":
                         if self._pending_trade and self._bot_ref:
-                            setup, dec = self._pending_trade
+                            pt = self._pending_trade
                             self._pending_trade = None
+                            if len(pt) == 3:
+                                sym, setup, dec = pt
+                            else:
+                                setup, dec = pt
+                                sym = config.SYMBOL
                             if getattr(self._bot_ref, "execute_confirmed_trade", None):
-                                self._bot_ref.execute_confirmed_trade(setup, dec)
+                                self._bot_ref.execute_confirmed_trade(sym, setup, dec)
                     elif data_val == "confirm_no":
                         self._pending_trade = None
                         self.send("❌ Trade cancelled.")

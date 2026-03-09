@@ -160,9 +160,12 @@ class AIEngine:
             d.confidence = abs(combined - 50) * 2  # 0-100
 
             # === FINAL DECISION ===
-            if combined >= 60 and d.confidence >= config.MIN_CONFIDENCE:
+            # Relaxed thresholds (55/45) for more trades (~50/day); MIN_CONFIDENCE gates quality
+            long_ok = combined >= 55 and d.confidence >= config.MIN_CONFIDENCE
+            short_ok = combined <= 45 and d.confidence >= config.MIN_CONFIDENCE
+            if long_ok:
                 d.signal = "LONG"
-            elif combined <= 40 and d.confidence >= config.MIN_CONFIDENCE:
+            elif short_ok:
                 d.signal = "SHORT"
             else:
                 d.signal = "NO_TRADE"
