@@ -40,8 +40,9 @@ def _clean_key(s: str) -> str:
 
 
 def _get_symbols() -> List[str]:
-    """Parse TRADING_SYMBOLS / TRADING_SYMBOL / SYMBOL from env. Mutable default not allowed in dataclass."""
-    _sym_env = os.environ.get("TRADING_SYMBOLS", os.environ.get("TRADING_SYMBOL", os.environ.get("SYMBOL", "BTCUSDT")))
+    """Parse TRADING_SYMBOLS / TRADING_SYMBOL / SYMBOL from env. Default: BTC, ETH, SOL, XRP, BNB."""
+    _default = "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,BNBUSDT"
+    _sym_env = os.environ.get("TRADING_SYMBOLS", os.environ.get("TRADING_SYMBOL", os.environ.get("SYMBOL", _default)))
     syms = [s.strip().upper() for s in _sym_env.replace(",", " ").split() if s.strip()]
     return syms if syms else ["BTCUSDT"]
 
@@ -53,7 +54,7 @@ class Config:
     API_SECRET: str = _clean_key(os.environ.get("BINANCE_API_SECRET", ""))
     TESTNET: bool = os.environ.get("BINANCE_TESTNET", "false").lower() == "true"
 
-    # Trading: one symbol (SYMBOL) or multiple (SYMBOLS). Default: BTCUSDT only.
+    # Trading: one or more symbols. Default: BTC, ETH, SOL, XRP, BNB.
     SYMBOLS: List[str] = field(default_factory=_get_symbols)
     SYMBOL: str = field(default_factory=lambda: _get_symbols()[0])
     LEVERAGE: int = int(os.environ.get("LEVERAGE", "10"))
