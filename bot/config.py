@@ -39,6 +39,13 @@ def _clean_key(s: str) -> str:
     return s.strip().strip('"').strip("'").replace("\r", "").replace("\n", "")
 
 
+def _get_symbols() -> List[str]:
+    """Parse TRADING_SYMBOLS / TRADING_SYMBOL / SYMBOL from env. Mutable default not allowed in dataclass."""
+    _sym_env = os.environ.get("TRADING_SYMBOLS", os.environ.get("TRADING_SYMBOL", os.environ.get("SYMBOL", "BTCUSDT")))
+    syms = [s.strip().upper() for s in _sym_env.replace(",", " ").split() if s.strip()]
+    return syms if syms else ["BTCUSDT"]
+
+
 @dataclass
 class Config:
     # Binance API
@@ -47,11 +54,8 @@ class Config:
     TESTNET: bool = os.environ.get("BINANCE_TESTNET", "false").lower() == "true"
 
     # Trading: one symbol (SYMBOL) or multiple (SYMBOLS). Default: BTCUSDT only.
-    _sym_env = os.environ.get("TRADING_SYMBOLS", os.environ.get("TRADING_SYMBOL", os.environ.get("SYMBOL", "BTCUSDT")))
-    SYMBOLS: List[str] = [s.strip().upper() for s in _sym_env.replace(",", " ").split() if s.strip()]
-    if not SYMBOLS:
-        SYMBOLS = ["BTCUSDT"]
-    SYMBOL: str = SYMBOLS[0]  # first symbol (backward compat)
+    SYMBOLS: List[str] = field(default_factory=_get_symbols)
+    SYMBOL: str = field(default_factory=lambda: _get_symbols()[0])
     LEVERAGE: int = int(os.environ.get("LEVERAGE", "10"))
     MARGIN_TYPE: str = os.environ.get("MARGIN_TYPE", "CROSSED")
     TIMEFRAMES: List[str] = field(default_factory=lambda: ["1m", "5m", "15m", "1h", "4h"])
