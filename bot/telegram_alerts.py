@@ -312,7 +312,8 @@ class TelegramAlerts:
             self.send("<b>⏸ PAUSED</b>", reply_markup=kb)
         elif cmd == "/resume":
             b._paused = False
-            self.send("<b>▶ RESUMED</b>", reply_markup=kb)
+            b._daily_limit_hit = False  # also clear daily limit so trading can resume
+            self.send("<b>▶ RESUMED</b> (pause and daily limit cleared)", reply_markup=kb)
 
     def start_polling(self):
         if not config.TG_ENABLED:

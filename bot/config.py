@@ -65,7 +65,7 @@ class Config:
     RISK_PER_TRADE: float = 10.0          # 10% of balance per trade
     MAX_PORTFOLIO_EXPOSURE: float = 10.0  # max 10% total exposure
     MAX_OPEN_POSITIONS: int = int(os.environ.get("MAX_OPEN_POSITIONS", "4"))
-    DAILY_LOSS_LIMIT: float = 5.0         # stop at 5% daily loss
+    DAILY_LOSS_LIMIT: float = float(os.environ.get("DAILY_LOSS_LIMIT", "0"))  # 0 = unlimited; e.g. 5 = stop at 5% daily loss
     SL_ATR_MULTIPLIER: float = 1.5
     TP_RR_MIN: float = 2.0               # minimum 2:1 reward:risk
     TP_RR_MAX: float = 3.0               # target 3:1 reward:risk

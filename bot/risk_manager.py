@@ -109,7 +109,9 @@ class RiskManager:
         return t
 
     def check_daily_limit(self, balance):
-        """Check if daily loss limit is hit."""
+        """Check if daily loss limit is hit. DAILY_LOSS_LIMIT <= 0 means unlimited (never pause)."""
+        if config.DAILY_LOSS_LIMIT <= 0:
+            return False
         if self.daily_start_balance <= 0:
             self.daily_start_balance = balance
             return False

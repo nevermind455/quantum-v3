@@ -120,7 +120,7 @@ class QuantumBot:
         print(f"  Orderbook:    {C.green('Depth + Walls + Imbalance')}")
         print(f"  Whale Detect: {C.green('ON')}")
         print(f"  Timeframes:   {C.cyan(' '.join(config.TIMEFRAMES))}")
-        print(f"  Daily Limit:  {C.yellow(f'{config.DAILY_LOSS_LIMIT}%')}")
+        print(f"  Daily Limit:  {C.yellow('Unlimited' if config.DAILY_LOSS_LIMIT <= 0 else f'{config.DAILY_LOSS_LIMIT}%')}")
         if config.TESTNET:
             print(f"  {C.bg_yellow(' TESTNET ')}")
         print(f"{C.line('=', 70)}\n")
